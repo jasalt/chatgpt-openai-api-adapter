@@ -21,11 +21,11 @@ Commands:
 
 Configuration:
 
-| Environment variable        | Default            | Meaning                                              |
-|-----------------------------|--------------------|------------------------------------------------------|
-| `CHATGPT_ADAPTER_ADDR`      | `127.0.0.1:8080`   | Listen address                                       |
-| `CHATGPT_ADAPTER_API_KEY`   | empty              | Optional API key clients must send as a Bearer token |
-| `CHATGPT_ADAPTER_AUTH_FILE` | OS user config dir | Credential file path                                 |
+| Environment variable        | Default                               | Meaning                                              |
+|-----------------------------|---------------------------------------|------------------------------------------------------|
+| `CHATGPT_ADAPTER_ADDR`      | `127.0.0.1:8080`                      | Listen address                                       |
+| `CHATGPT_ADAPTER_API_KEY`   | empty                                 | Optional API key clients must send as a Bearer token |
+| `CHATGPT_ADAPTER_AUTH_FILE` | ~/.config/chatgpt-openai-api-adapter/ | Credential file path                                 |
 
 A non-loopback listener requires `CHATGPT_ADAPTER_API_KEY`.
 
