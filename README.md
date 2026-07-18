@@ -52,12 +52,17 @@ OpenAI SDKs can use `http://127.0.0.1:8080/v1` as their base URL. If no proxy AP
 
 [Emacs gptel](https://deepwiki.com/karthink/gptel):
 ```elisp
-(gptel-make-openai "chatgpt-proxy"
-    :host "localhost:8080"
-    :protocol "http"
-    :endpoint "/v1/chat/completions"
-    :stream t
-    :models '(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna))
+(gptel-make-openai "codex-proxy"
+  :host "localhost:8080"
+  :protocol "http"
+  :endpoint "/v1/chat/completions"
+  :stream t
+  :models (mapcar (lambda (model)
+                    `(,model
+                      :capabilities (tool-use json)
+                      :mime-types ("image/jpeg" "image/png"
+                                   "image/gif" "image/webp")))
+                  '(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna)))
 ```
 
 ## Vibe coding disclaimer / warranty / roadmap
