@@ -2,7 +2,21 @@
 
 Minimal Go proxy that allows using ChatGPT subscription via OpenAI-compatible API. Takes around 10-20MB of system RAM while in use.
 
-## Run
+## Install
+
+Install the latest release for Linux (amd64/arm64) or Apple Silicon macOS into the first writable directory in `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jasalt/chatgpt-openai-api-adapter/master/install.sh | bash
+```
+
+Choose the destination explicitly when needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jasalt/chatgpt-openai-api-adapter/master/install.sh | INSTALL_DIR="$HOME/.local/bin" bash
+```
+
+Or build from source:
 
 ```bash
 go build -o chatgpt-openai-api-adapter .

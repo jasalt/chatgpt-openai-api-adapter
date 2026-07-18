@@ -8,6 +8,7 @@ on:
       - "**.go"
       - "go.mod"
       - "go.sum"
+      - "install.sh"
       - ".github/workflows/build.yml"
     tags:
       - "v*"
@@ -18,6 +19,7 @@ on:
       - "**.go"
       - "go.mod"
       - "go.sum"
+      - "install.sh"
       - ".github/workflows/build.yml"
 
 jobs:
@@ -40,6 +42,7 @@ jobs:
           go-version: "1.22"
 
       - run: go mod tidy
+      - run: bash -n install.sh
 
       - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
