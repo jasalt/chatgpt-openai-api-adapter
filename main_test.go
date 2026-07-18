@@ -58,6 +58,18 @@ func TestToolCallUsesItemIDForArgumentEvents(t *testing.T) {
 	}
 }
 
+func TestNonLoopbackListenerRequiresAPIKey(t *testing.T) {
+	if err := safeListenAddress("0.0.0.0:8080", ""); err == nil {
+		t.Fatal("non-loopback listener without API key was allowed")
+	}
+	if err := safeListenAddress("0.0.0.0:8080", "secret"); err != nil {
+		t.Fatalf("non-loopback listener with API key: %v", err)
+	}
+	if err := safeListenAddress("127.0.0.1:8080", ""); err != nil {
+		t.Fatalf("loopback listener without API key: %v", err)
+	}
+}
+
 func TestJWTAccountID(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"exp":                         9999999999,
