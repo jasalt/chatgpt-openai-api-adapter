@@ -1,0 +1,14 @@
+[Unit]
+Description=ChatGPT OpenAI API adapter
+Documentation=https://github.com/jasalt/chatgpt-openai-api-adapter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Environment=CHATGPT_ADAPTER_ADDR=127.0.0.1:8080
+ExecStart=%h/.local/bin/chatgpt-openai-api-adapter serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
