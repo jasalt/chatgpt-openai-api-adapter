@@ -71,6 +71,10 @@ The service starts with the user's systemd session. To also start it at boot wit
 sudo loginctl enable-linger "$USER"
 ```
 
+### Refreshing session
+
+When API returns 502 "Your session has ended. Please log in again.", login again with `$HOME/.local/bin/chatgpt-openai-api-adapter login` and afterwards restart the service with `systemctl --user restart chatgpt-openai-api-adapter.service`.
+
 ## API
 
 - `POST /v1/chat/completions` — streaming and non-streaming, tools, images, structured output, reasoning effort
