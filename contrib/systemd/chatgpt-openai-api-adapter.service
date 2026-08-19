@@ -7,6 +7,7 @@ After=network-online.target
 [Service]
 # Environment=CHATGPT_ADAPTER_API_KEY=CHANGEME  # Set if listening to other than loopback address
 Environment=CHATGPT_ADAPTER_ADDR=127.0.0.1:8080
+# Environment=CHATGPT_ADAPTER_SESSION_ID=  # Optional stable default prompt-cache / WebSocket session key (random per start by default)
 ExecStart=%h/.local/bin/chatgpt-openai-api-adapter serve
 Restart=on-failure
 RestartSec=5
