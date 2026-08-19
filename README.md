@@ -111,6 +111,39 @@ OpenAI SDKs can use `http://127.0.0.1:8080/v1` as their base URL. If no proxy AP
                   '(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna)))
 ```
 
+[Pi coding agent]() `~/.pi/agent/models.json`:
+```json
+{
+  "providers": {
+    "codex-gateway": {
+      "baseUrl": "http://localhost:11400/v1",
+      "api": "openai-completions",
+      "apiKey": "CHANGEME",
+      "models": [
+        {
+          "id": "gpt-5.6-sol",
+          "name": "GPT-5.6 Sol",
+          "input": ["text", "image"],
+          "contextWindow": 272000
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "name": "GPT-5.6 Terra",
+          "input": ["text", "image"],
+          "contextWindow": 272000
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "name": "GPT-5.6 Luna",
+          "input": ["text", "image"],
+          "contextWindow": 272000
+        }
+      ]
+    }
+  }
+}
+```
+
 ## Vibe coding disclaimer / warranty / roadmap
 
 Generated using [Pi](https://github.com/earendil-works/pi/) coding agent and `gpt-5.6-sol high`. Code was skimmed through and tested manually with Curl and Emacs gptel clients.
