@@ -100,3 +100,39 @@ func TestJWTAccountID(t *testing.T) {
 		t.Fatalf("id=%q err=%v", id, err)
 	}
 }
+
+func TestClampPromptCacheKey(t *testing.T) {
+	short := "abc"
+	if got := clampPromptCacheKey(short); got != short {
+		t.Fatalf("short key changed: %q", got)
+	}
+	long := strings.Repeat("x", promptCacheKeyMaxLength+10)
+	if got := clampPromptCacheKey(long); len([]rune(got)) != promptCacheKeyMaxLength {
+		t.Fatalf("long key not truncated to %d runes: len=%d", promptCacheKeyMaxLength, len([]rune(got)))
+	}
+	// Multi-byte safe: must not split a rune.
+	multi := strings.Repeat("\u00e9", promptCacheKeyMaxLength+2)
+	if got := clampPromptCacheKey(multi); len([]rune(got)) != promptCacheKeyMaxLength {
+		t.Fatalf("multi-byte key not truncated by rune: len=%d", len([]rune(got)))
+	}
+}
+
+func TestApplyPromptCacheKey(t *testing.T) {
+	request := map[string]any{"model": "gpt-5.4"}
+	applyPromptCacheKey(request, "sess-1")
+	if request["prompt_cache_key"] != "sess-1" {
+		t.Fatalf("prompt_cache_key not set: %#v", request)
+	}
+	// An explicit client value must be preserved.
+	request["prompt_cache_key"] = "client-key"
+	applyPromptCacheKey(request, "sess-1")
+	if request["prompt_cache_key"] != "client-key" {
+		t.Fatalf("client prompt_cache_key was overwritten: %#v", request)
+	}
+	// Empty key is a no-op.
+	fresh := map[string]any{"model": "gpt-5.4"}
+	applyPromptCacheKey(fresh, "")
+	if _, ok := fresh["prompt_cache_key"]; ok {
+		t.Fatalf("empty key set prompt_cache_key: %#v", fresh)
+	}
+}

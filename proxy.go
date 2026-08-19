@@ -23,10 +23,16 @@ const upstreamResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
 
 var modelIDs = []string{"gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
 
+// promptCacheKeyMaxLength matches OpenAI's limit for prompt_cache_key values
+// (see pi/packages/ai/src/api/openai-prompt-cache.ts). Keys longer than this
+// are truncated so the Codex backend still treats them as a valid cache key.
+const promptCacheKeyMaxLength = 64
+
 type proxyServer struct {
-	store  *tokenStore
-	client *http.Client
-	apiKey string
+	store     *tokenStore
+	client    *http.Client
+	apiKey    string
+	sessionID string
 }
 
 type upstreamError struct {
@@ -37,7 +43,11 @@ type upstreamError struct {
 func (e *upstreamError) Error() string { return fmt.Sprintf("upstream HTTP %d: %s", e.status, e.body) }
 
 func newProxyServer(store *tokenStore, client *http.Client, apiKey string) *proxyServer {
-	return &proxyServer{store: store, client: client, apiKey: apiKey}
+	sessionID := os.Getenv("CHATGPT_ADAPTER_SESSION_ID")
+	if sessionID == "" {
+		sessionID = randomID()
+	}
+	return &proxyServer{store: store, client: client, apiKey: apiKey, sessionID: clampPromptCacheKey(sessionID)}
 }
 
 func (s *proxyServer) routes() http.Handler {
@@ -90,7 +100,9 @@ func (s *proxyServer) chat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	upstream, err := s.upstream(r.Context(), request)
+	sessionID := s.resolveSessionID(r)
+	applyPromptCacheKey(request, sessionID)
+	upstream, err := s.upstream(r.Context(), request, sessionID)
 	if err != nil {
 		s.writeUpstreamError(w, err)
 		return
@@ -124,7 +136,9 @@ func (s *proxyServer) responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	upstream, err := s.upstream(r.Context(), request)
+	sessionID := s.resolveSessionID(r)
+	applyPromptCacheKey(request, sessionID)
+	upstream, err := s.upstream(r.Context(), request, sessionID)
 	if err != nil {
 		s.writeUpstreamError(w, err)
 		return
@@ -148,7 +162,7 @@ func (s *proxyServer) responses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *proxyServer) upstream(ctx context.Context, body map[string]any) (io.ReadCloser, error) {
+func (s *proxyServer) upstream(ctx context.Context, body map[string]any, sessionID string) (io.ReadCloser, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -169,7 +183,11 @@ func (s *proxyServer) upstream(ctx context.Context, body map[string]any) (io.Rea
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
 		req.Header.Set("originator", "pi")
 		req.Header.Set("User-Agent", "chatgpt-openai-api-adapter/1")
-		req.Header.Set("x-client-request-id", randomID())
+		// Stable per-session identifiers enable OpenAI's prompt cache: requests
+		// sharing the same key and prompt prefix reuse cached tokens. The Codex
+		// backend also correlates requests via the session-id header.
+		req.Header.Set("session-id", sessionID)
+		req.Header.Set("x-client-request-id", sessionID)
 		resp, err := s.client.Do(req)
 		if err != nil {
 			return nil, err
@@ -215,6 +233,43 @@ func randomID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// resolveSessionID returns the prompt-cache/session identifier for a request.
+// Clients may override the proxy's default session by sending an X-Session-Id
+// header (useful for keeping separate conversations in separate cache
+// namespaces); otherwise the proxy-wide default session ID is used so that
+// repeated prompt prefixes across requests benefit from the OpenAI prompt
+// cache.
+func (s *proxyServer) resolveSessionID(r *http.Request) string {
+	for _, header := range []string{"X-Session-Id", "X-Prompt-Cache-Key"} {
+		if key := strings.TrimSpace(r.Header.Get(header)); key != "" {
+			return clampPromptCacheKey(key)
+		}
+	}
+	return s.sessionID
+}
+
+// applyPromptCacheKey sets prompt_cache_key on the upstream request body when
+// the client has not already supplied one. Preserving an explicit client value
+// (e.g. from a native /v1/responses request) keeps cache namespaces under the
+// caller's control.
+func applyPromptCacheKey(request map[string]any, key string) {
+	if key == "" {
+		return
+	}
+	if _, ok := request["prompt_cache_key"]; !ok {
+		request["prompt_cache_key"] = key
+	}
+}
+
+// clampPromptCacheKey truncates a cache key to OpenAI's maximum length, using
+// rune counts so multi-byte keys are not split mid-character.
+func clampPromptCacheKey(key string) string {
+	if len([]rune(key)) <= promptCacheKeyMaxLength {
+		return key
+	}
+	return string([]rune(key)[:promptCacheKeyMaxLength])
 }
 
 type flushWriter struct{ http.ResponseWriter }
