@@ -40,6 +40,8 @@ func run() error {
 		}
 		fmt.Println("Logged out.")
 		return nil
+	case "usage":
+		return codexUsage(ctx, store)
 	case "serve":
 		if !store.authenticated() {
 			fmt.Println("No saved login found; starting interactive login.")
@@ -72,6 +74,6 @@ func run() error {
 		}
 		return err
 	default:
-		return fmt.Errorf("unknown command %q (use serve, login, or logout)", command)
+		return fmt.Errorf("unknown command %q (use serve, login, logout, or usage)", command)
 	}
 }

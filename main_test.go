@@ -70,6 +70,25 @@ func TestNonLoopbackListenerRequiresAPIKey(t *testing.T) {
 	}
 }
 
+func TestWeeklyWindow(t *testing.T) {
+	payload := map[string]any{
+		"rate_limit": map[string]any{
+			"primary_window":   map[string]any{"used_percent": 10.0, "limit_window_seconds": float64(18_000), "reset_at": float64(100)},
+			"secondary_window": map[string]any{"used_percent": 42.0, "limit_window_seconds": float64(604_800), "reset_at": float64(200)},
+		},
+	}
+	window, ok := weeklyWindow(payload)
+	if !ok || window.usedPercent != 42 || window.resetAt != 200 {
+		t.Fatalf("window=%#v ok=%v", window, ok)
+	}
+}
+
+func TestWeeklyWindowMissing(t *testing.T) {
+	if _, ok := weeklyWindow(map[string]any{"rate_limit": map[string]any{}}); ok {
+		t.Fatal("expected no weekly window")
+	}
+}
+
 func TestJWTAccountID(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"exp":                         9999999999,
