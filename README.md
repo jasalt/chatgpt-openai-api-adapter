@@ -40,6 +40,7 @@ Configuration:
 | `CHATGPT_ADAPTER_ADDR`      | `127.0.0.1:8080`                      | Listen address                                       |
 | `CHATGPT_ADAPTER_API_KEY`   | empty                                 | Optional API key clients must send as a Bearer token |
 | `CHATGPT_ADAPTER_AUTH_FILE` | ~/.config/chatgpt-openai-api-adapter/ | Credential file path                                 |
+| `CHATGPT_ADAPTER_SESSION_ID`| random per start                      | Default prompt-cache / WebSocket session key when a client sends no `X-Session-Id` |
 
 A non-loopback listener requires `CHATGPT_ADAPTER_API_KEY`.
 
@@ -92,7 +93,21 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 OpenAI SDKs can use `http://127.0.0.1:8080/v1` as their base URL. If no proxy API key is configured, any placeholder SDK API key works.
 
-`previous_response_id` is rejected explicitly because it requires Codex's WebSocket transport; send full conversation history instead.
+`previous_response_id` is honored: when a client sends it (native `/v1/responses`), the proxy passes it through. When omitted, the proxy derives one automatically via WebSocket continuation (see [Prompt caching](#prompt-caching) below).
+
+Clients may send an `X-Session-Id` (or `X-Prompt-Cache-Key`) header to pin a cache/continuation namespace per conversation; without it the proxy-wide default (`CHATGPT_ADAPTER_SESSION_ID` or a random value) is used.
+
+## Prompt caching
+
+The proxy uses two complementary mechanisms to reduce repeated token billing, mirroring Pi's `openai-codex-responses` integration:
+
+1. **Static-prefix cache (`prompt_cache_key`)** — every upstream request carries a stable `prompt_cache_key` plus `session-id`/`x-client-request-id` headers. Requests sharing the same key and an identical system/tools prefix reuse cached tokens. This works over both SSE and WebSocket and requires no client cooperation. The OpenAI prompt cache only engages for prefixes above ~1024 tokens, so small requests show no caching.
+
+2. **Conversation-history cache (WebSocket continuation)** — when a client supplies an `X-Session-Id`, the proxy opens a pooled WebSocket to `wss://chatgpt.com/backend-api/codex/responses` and, from the second turn on, sends only the *delta* (new input items) plus `previous_response_id` instead of the full conversation. The Codex backend replays the prior turns from server-side state, so the history is not re-transmitted or re-billed as fresh input. Each `X-Session-Id` gets its own cached connection; concurrent requests on the same session open one-off sockets so streams are never multiplexed on a shared connection. Different session IDs are fully isolated. Without an `X-Session-Id` the proxy falls back to SSE (static-prefix caching only).
+
+### Accounting difference vs Pi's native OAuth path
+
+Both mechanisms are functionally effective (verified: with WebSocket continuation the server recalls turns it was never sent, and the proxy transmits only the delta per turn). However, the Codex backend bills the server-retrieved prior context as regular `input_tokens` rather than as `cached_tokens`. As a result, the `cached_tokens` / `cacheRead` usage field reports only the **static-prefix** portion and does **not** grow across turns the way Pi's native `openai-codex-responses` (WebSocket + `previous_response_id`) path does. The bandwidth and input-cost savings are real, but clients that surface a cache-hit rate (e.g. Pi's footer `R{N}`) will show a lower read number over the proxy than over the native connection. This is a backend accounting difference, not a proxy bug.
 
 ## Example LLM client config
 
