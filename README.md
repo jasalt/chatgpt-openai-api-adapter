@@ -119,6 +119,11 @@ OpenAI SDKs can use `http://127.0.0.1:8080/v1` as their base URL. If no proxy AP
       "baseUrl": "http://localhost:11400/v1",
       "api": "openai-completions",
       "apiKey": "CHANGEME",
+      "compat": {
+       "sendSessionAffinityHeaders": true,
+       "supportsLongCacheRetention": true
+      },
+      "cacheRetention": "long",
       "models": [
         {
           "id": "gpt-5.6-sol",
