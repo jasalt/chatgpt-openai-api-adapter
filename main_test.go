@@ -3,9 +3,15 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 )
+
+// fromReader wraps an io.Reader as an eventStream for tests.
+func fromReader(r io.Reader) eventStream {
+	return func(emit func(sseEvent) error) error { return readSSE(r, emit) }
+}
 
 func TestChatTranslationAndCollection(t *testing.T) {
 	raw := []byte(`{
@@ -30,7 +36,7 @@ func TestChatTranslationAndCollection(t *testing.T) {
 
 	sse := strings.NewReader("event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n" +
 		"event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n")
-	response, err := collectChat(sse, model)
+	response, _, err := collectChat(fromReader(sse), model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +51,7 @@ func TestToolCallUsesItemIDForArgumentEvents(t *testing.T) {
 	sse := strings.NewReader("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"item_1\",\"call_id\":\"call_1\",\"name\":\"lookup\"}}\n\n" +
 		"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"item_1\",\"delta\":\"{\\\"id\\\":1}\"}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n")
-	response, err := collectChat(sse, "gpt-5.4")
+	response, _, err := collectChat(fromReader(sse), "gpt-5.4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,5 +140,134 @@ func TestApplyPromptCacheKey(t *testing.T) {
 	applyPromptCacheKey(fresh, "")
 	if _, ok := fresh["prompt_cache_key"]; ok {
 		t.Fatalf("empty key set prompt_cache_key: %#v", fresh)
+	}
+}
+
+func TestBuildDeltaRequest(t *testing.T) {
+	turn1 := map[string]any{
+		"model": "gpt-5.6-luna", "instructions": "sys", "stream": true,
+		"store": false, "prompt_cache_key": "sess",
+		"input": []any{map[string]any{"role": "user", "content": "u1"}},
+	}
+	cont := &continuationState{
+		lastRequestBody:   turn1,
+		lastResponseID:    "resp_1",
+		lastResponseItems: []any{map[string]any{"role": "assistant", "content": "a1"}},
+	}
+
+	// Turn 2 extends the conversation: input = [u1, assistant a1, u2].
+	turn2 := copyMap(turn1)
+	turn2["input"] = []any{
+		map[string]any{"role": "user", "content": "u1"},
+		map[string]any{"role": "assistant", "content": "a1"},
+		map[string]any{"role": "user", "content": "u2"},
+	}
+	delta, ok := buildDeltaRequest(turn2, cont)
+	if !ok {
+		t.Fatal("expected delta continuation to apply")
+	}
+	if delta["previous_response_id"] != "resp_1" {
+		t.Fatalf("previous_response_id not set: %#v", delta)
+	}
+	gotInput, _ := delta["input"].([]any)
+	if len(gotInput) != 1 || gotInput[0].(map[string]any)["content"] != "u2" {
+		t.Fatalf("delta input should be only the new item: %#v", gotInput)
+	}
+	// Original body must not be mutated.
+	if _, has := turn2["previous_response_id"]; has {
+		t.Fatal("buildDeltaRequest mutated the input body")
+	}
+}
+
+func TestBuildDeltaRequestFallsBackWhenPrefixDiffers(t *testing.T) {
+	turn1 := map[string]any{"model": "m", "input": []any{map[string]any{"role": "user", "content": "u1"}}}
+	cont := &continuationState{
+		lastRequestBody:   turn1,
+		lastResponseID:    "resp_1",
+		lastResponseItems: []any{map[string]any{"role": "assistant", "content": "a1"}},
+	}
+	// Different system/instructions -> body mismatch -> no delta.
+	turn2 := map[string]any{
+		"model": "m", "instructions": "changed",
+		"input": []any{
+			map[string]any{"role": "user", "content": "u1"},
+			map[string]any{"role": "assistant", "content": "a1"},
+			map[string]any{"role": "user", "content": "u2"},
+		},
+	}
+	if _, ok := buildDeltaRequest(turn2, cont); ok {
+		t.Fatal("expected no delta when body differs outside input")
+	}
+	// Client-supplied previous_response_id defers to client.
+	turn3 := copyMap(turn1)
+	turn3["previous_response_id"] = "client_resp"
+	if _, ok := buildDeltaRequest(turn3, cont); ok {
+		t.Fatal("expected no delta when client supplies previous_response_id")
+	}
+}
+
+func TestBuildDeltaRequestMatchesStructuredOutput(t *testing.T) {
+	// Turn 1 request input: a user message with string content.
+	turn1 := map[string]any{
+		"model": "gpt-5.6-luna", "instructions": "sys", "stream": true,
+		"store": false, "prompt_cache_key": "sess",
+		"input": []any{map[string]any{"role": "user", "content": "u1"}},
+	}
+	// The server reports the assistant reply as a structured message item.
+	assistantOutput := []any{map[string]any{
+		"type": "message", "role": "assistant", "status": "completed",
+		"content": []any{map[string]any{"type": "output_text", "text": "a1"}},
+	}}
+	cont := &continuationState{
+		lastRequestBody:   turn1,
+		lastResponseID:    "resp_1",
+		lastResponseItems: responseOutputToInputItems(assistantOutput, false),
+	}
+	// Turn 2 input resends the assistant reply as a plain string content
+	// message (the shape a Responses-API client uses to reconstruct history).
+	turn2 := copyMap(turn1)
+	turn2["input"] = []any{
+		map[string]any{"role": "user", "content": "u1"},
+		map[string]any{"role": "assistant", "content": "a1"},
+		map[string]any{"role": "user", "content": "u2"},
+	}
+	delta, ok := buildDeltaRequest(turn2, cont)
+	if !ok {
+		t.Fatal("expected delta to apply: structured output must normalize to match string content")
+	}
+	gotInput, _ := delta["input"].([]any)
+	if len(gotInput) != 1 || gotInput[0].(map[string]any)["content"] != "u2" {
+		t.Fatalf("delta should contain only the new user item: %#v", gotInput)
+	}
+	if delta["previous_response_id"] != "resp_1" {
+		t.Fatalf("previous_response_id not set: %#v", delta)
+	}
+}
+
+func TestResponseOutputToInputItems(t *testing.T) {
+	output := []any{
+		map[string]any{"type": "message", "role": "assistant", "content": []any{
+			map[string]any{"type": "output_text", "text": "hello"},
+		}},
+		map[string]any{"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+		map[string]any{"type": "reasoning", "id": "r1"},
+	}
+	chat := responseOutputToInputItems(output, true)
+	if len(chat) != 2 {
+		t.Fatalf("chat form should drop reasoning: %#v", chat)
+	}
+	if chat[0].(map[string]any)["role"] != "assistant" || chat[0].(map[string]any)["content"] != "hello" {
+		t.Fatalf("message not converted to chat input form: %#v", chat[0])
+	}
+	if chat[1].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("function_call not preserved: %#v", chat[1])
+	}
+	// Native form keeps reasoning.
+	native := responseOutputToInputItems(output, false)
+	if len(native) != 3 {
+		t.Fatalf("native form should keep reasoning: %#v", native)
+	}
+	if native[0].(map[string]any)["content"] != "hello" {
+		t.Fatalf("native message content should be flattened to string: %#v", native[0])
 	}
 }

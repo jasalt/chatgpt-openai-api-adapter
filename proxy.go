@@ -33,6 +33,7 @@ type proxyServer struct {
 	client    *http.Client
 	apiKey    string
 	sessionID string
+	pool      *sessionPool
 }
 
 type upstreamError struct {
@@ -47,7 +48,13 @@ func newProxyServer(store *tokenStore, client *http.Client, apiKey string) *prox
 	if sessionID == "" {
 		sessionID = randomID()
 	}
-	return &proxyServer{store: store, client: client, apiKey: apiKey, sessionID: clampPromptCacheKey(sessionID)}
+	return &proxyServer{
+		store:     store,
+		client:    client,
+		apiKey:    apiKey,
+		sessionID: clampPromptCacheKey(sessionID),
+		pool:      newSessionPool(),
+	}
 }
 
 func (s *proxyServer) routes() http.Handler {
@@ -102,23 +109,22 @@ func (s *proxyServer) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := s.resolveSessionID(r)
 	applyPromptCacheKey(request, sessionID)
-	upstream, err := s.upstream(r.Context(), request, sessionID)
+	src, err := s.openEventSource(r.Context(), request, sessionID, true)
 	if err != nil {
 		s.writeUpstreamError(w, err)
 		return
 	}
-	defer upstream.Close()
 	if stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(http.StatusOK)
-		if err := streamChat(w, upstream, model); err != nil {
+		writeStreamHeaders(w)
+		meta, err := streamChat(w, src.read, model)
+		src.finalize(meta)
+		if err != nil {
 			log.Printf("chat stream: %v", err)
 		}
 		return
 	}
-	response, err := collectChat(upstream, model)
+	response, meta, err := collectChat(src.read, model)
+	src.finalize(meta)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
@@ -138,23 +144,22 @@ func (s *proxyServer) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := s.resolveSessionID(r)
 	applyPromptCacheKey(request, sessionID)
-	upstream, err := s.upstream(r.Context(), request, sessionID)
+	src, err := s.openEventSource(r.Context(), request, sessionID, false)
 	if err != nil {
 		s.writeUpstreamError(w, err)
 		return
 	}
-	defer upstream.Close()
 	if stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(http.StatusOK)
-		if err := streamResponses(w, upstream); err != nil {
+		writeStreamHeaders(w)
+		meta, err := streamResponses(w, src.read)
+		src.finalize(meta)
+		if err != nil {
 			log.Printf("responses stream: %v", err)
 		}
 		return
 	}
-	response, err := collectResponse(upstream)
+	response, meta, err := collectResponse(src.read)
+	src.finalize(meta)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
@@ -162,7 +167,150 @@ func (s *proxyServer) responses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *proxyServer) upstream(ctx context.Context, body map[string]any, sessionID string) (io.ReadCloser, error) {
+func writeStreamHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+}
+
+// eventStream yields upstream response events to emit. It abstracts over the
+// SSE and WebSocket transports so the collectors are transport-agnostic.
+type eventStream func(emit func(sseEvent) error) error
+
+// responseMeta captures the terminal response so the WebSocket transport can
+// store continuation state for the next turn's delta computation.
+type responseMeta struct {
+	responseID string
+	items      []any
+	completed  bool
+	incomplete bool
+}
+
+// eventSource bundles an event stream with a finalize hook called after the
+// stream has been fully consumed. For the WebSocket transport, finalize stores
+// the continuation state and releases the pooled connection; for SSE it closes
+// the response body.
+type eventSource struct {
+	read     eventStream
+	finalize func(meta responseMeta)
+}
+
+// openEventSource selects a transport. The WebSocket continuation transport is
+// used only when a per-session identifier is available (via X-Session-Id or
+// X-Prompt-Cache-Key from the client), so that parallel sessions get isolated
+// continuation state. Without a per-session key the proxy falls back to SSE,
+// which still yields static-prefix caching via prompt_cache_key.
+//
+// forChat selects the response-item conversion shape used for continuation
+// (Chat Completions vs native Responses input form).
+func (s *proxyServer) openEventSource(ctx context.Context, request map[string]any, sessionID string, forChat bool) (*eventSource, error) {
+	if s.pool != nil && sessionID != "" && sessionID != s.sessionID {
+		src, err := s.wsSource(ctx, request, sessionID, forChat)
+		if err == nil {
+			return src, nil
+		}
+		log.Printf("websocket transport unavailable, falling back to SSE: %v", err)
+	}
+	return s.sseSource(ctx, request, sessionID)
+}
+
+func (s *proxyServer) sseSource(ctx context.Context, request map[string]any, sessionID string) (*eventSource, error) {
+	body, err := s.upstreamSSE(ctx, request, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	stream := eventStream(func(emit func(sseEvent) error) error { return readSSE(body, emit) })
+	finalize := func(_ responseMeta) { body.Close() }
+	return &eventSource{read: stream, finalize: finalize}, nil
+}
+
+func (s *proxyServer) wsSource(ctx context.Context, fullBody map[string]any, sessionID string, forChat bool) (*eventSource, error) {
+	acq, requestBody, usedDelta, err := s.acquireWS(ctx, fullBody, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	_ = usedDelta
+	frame := map[string]any{"type": "response.create"}
+	for k, v := range requestBody {
+		frame[k] = v
+	}
+	if err := acq.session.socket.WriteJSON(frame); err != nil {
+		acq.release(false)
+		return nil, err
+	}
+	stream := eventStream(func(emit func(sseEvent) error) error {
+		return readWebSocket(acq.session.socket, emit)
+	})
+	finalize := func(meta responseMeta) {
+		keep := meta.completed && meta.responseID != ""
+		if keep {
+			items := responseOutputToInputItems(meta.items, forChat)
+			acq.session.mu.Lock()
+			acq.session.continuation = &continuationState{
+				lastRequestBody:   fullBody,
+				lastResponseID:    meta.responseID,
+				lastResponseItems: items,
+			}
+			acq.session.mu.Unlock()
+		} else {
+			acq.session.mu.Lock()
+			acq.session.continuation = nil
+			acq.session.mu.Unlock()
+		}
+		acq.release(keep)
+	}
+	return &eventSource{read: stream, finalize: finalize}, nil
+}
+
+// acquireWS obtains a (possibly cached) WebSocket session and computes the
+// request body to send: a delta against the prior turn when continuation state
+// exists and the current input extends it, otherwise the full input.
+func (s *proxyServer) acquireWS(ctx context.Context, fullBody map[string]any, sessionID string) (*acquiredSession, map[string]any, bool, error) {
+	headerBuilder := func() (http.Header, error) {
+		token, accountID, err := s.store.token(ctx, false)
+		if err != nil {
+			return nil, err
+		}
+		return s.wsHeaders(token, accountID, sessionID), nil
+	}
+	acq, err := s.pool.acquire(ctx, sessionID, headerBuilder)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	requestBody := fullBody
+	usedDelta := false
+	acq.session.mu.Lock()
+	cont := acq.session.continuation
+	acq.session.mu.Unlock()
+	if cont != nil {
+		if delta, ok := buildDeltaRequest(fullBody, cont); ok {
+			requestBody = delta
+			usedDelta = true
+		} else {
+			acq.session.mu.Lock()
+			acq.session.continuation = nil
+			acq.session.mu.Unlock()
+		}
+	}
+	return acq, requestBody, usedDelta, nil
+}
+
+func (s *proxyServer) wsHeaders(token, accountID, sessionID string) http.Header {
+	h := http.Header{}
+	h.Set("Authorization", "Bearer "+token)
+	h.Set("ChatGPT-Account-Id", accountID)
+	h.Set("originator", "pi")
+	h.Set("User-Agent", "chatgpt-openai-api-adapter/1")
+	h.Set("OpenAI-Beta", wsBetaHeaderValue)
+	h.Set("session-id", sessionID)
+	h.Set("x-client-request-id", sessionID)
+	return h
+}
+
+// upstreamSSE POSTs the request to the Codex SSE endpoint, retrying once on
+// 401 after forcing a token refresh.
+func (s *proxyServer) upstreamSSE(ctx context.Context, body map[string]any, sessionID string) (io.ReadCloser, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -237,10 +385,9 @@ func randomID() string {
 
 // resolveSessionID returns the prompt-cache/session identifier for a request.
 // Clients may override the proxy's default session by sending an X-Session-Id
-// header (useful for keeping separate conversations in separate cache
-// namespaces); otherwise the proxy-wide default session ID is used so that
-// repeated prompt prefixes across requests benefit from the OpenAI prompt
-// cache.
+// (or X-Prompt-Cache-Key) header; this keeps separate conversations in
+// separate cache namespaces and is required for WebSocket continuation.
+// Otherwise the proxy-wide default session ID is used.
 func (s *proxyServer) resolveSessionID(r *http.Request) string {
 	for _, header := range []string{"X-Session-Id", "X-Prompt-Cache-Key"} {
 		if key := strings.TrimSpace(r.Header.Get(header)); key != "" {
@@ -252,8 +399,7 @@ func (s *proxyServer) resolveSessionID(r *http.Request) string {
 
 // applyPromptCacheKey sets prompt_cache_key on the upstream request body when
 // the client has not already supplied one. Preserving an explicit client value
-// (e.g. from a native /v1/responses request) keeps cache namespaces under the
-// caller's control.
+// keeps cache namespaces under the caller's control.
 func applyPromptCacheKey(request map[string]any, key string) {
 	if key == "" {
 		return
@@ -349,6 +495,7 @@ type chatCollector struct {
 	callIndex  map[string]int
 	usage      map[string]any
 	responseID string
+	output     []any
 	completed  bool
 	incomplete bool
 }
@@ -361,6 +508,15 @@ type toolCall struct {
 }
 
 func newChatCollector() *chatCollector { return &chatCollector{callIndex: map[string]int{}} }
+
+func (c *chatCollector) meta() responseMeta {
+	return responseMeta{
+		responseID: c.responseID,
+		items:      c.output,
+		completed:  c.completed,
+		incomplete: c.incomplete,
+	}
+}
 
 func (c *chatCollector) consume(event sseEvent, emit func(map[string]any) error) error {
 	switch event.name {
@@ -378,6 +534,9 @@ func (c *chatCollector) consume(event sseEvent, emit func(map[string]any) error)
 		}
 	case "response.output_item.added", "response.output_item.done":
 		item, _ := event.data["item"].(map[string]any)
+		if event.name == "response.output_item.done" && item != nil {
+			c.output = append(c.output, item)
+		}
 		if item["type"] == "function_call" {
 			id, _ := item["call_id"].(string)
 			itemID, _ := item["id"].(string)
@@ -434,6 +593,9 @@ func (c *chatCollector) consume(event sseEvent, emit func(map[string]any) error)
 		c.usage, _ = response["usage"].(map[string]any)
 		c.completed = true
 		c.incomplete = event.name == "response.incomplete"
+		if out, ok := response["output"].([]any); ok && len(out) > 0 {
+			c.output = out
+		}
 	case "response.failed", "error":
 		return fmt.Errorf("Codex response failed: %s", errorMessage(event.data))
 	}
@@ -448,7 +610,7 @@ func eventCallID(data map[string]any) string {
 	return id
 }
 
-func streamChat(w http.ResponseWriter, body io.Reader, model string) error {
+func streamChat(w http.ResponseWriter, stream eventStream, model string) (responseMeta, error) {
 	id := "chatcmpl-" + randomID()
 	created := time.Now().Unix()
 	writeChunk := func(delta map[string]any, finish any, usage any) error {
@@ -467,10 +629,10 @@ func streamChat(w http.ResponseWriter, body io.Reader, model string) error {
 		return err
 	}
 	if err := writeChunk(map[string]any{"role": "assistant"}, nil, nil); err != nil {
-		return err
+		return responseMeta{}, err
 	}
 	collector := newChatCollector()
-	err := readSSE(body, func(event sseEvent) error {
+	err := stream(func(event sseEvent) error {
 		return collector.consume(event, func(delta map[string]any) error { return writeChunk(delta, nil, nil) })
 	})
 	if err == nil && !collector.completed {
@@ -480,7 +642,7 @@ func streamChat(w http.ResponseWriter, body io.Reader, model string) error {
 		data, _ := json.Marshal(map[string]any{"error": map[string]any{"message": err.Error(), "type": "upstream_error", "code": "upstream_error"}})
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
-		return err
+		return collector.meta(), err
 	}
 	finish := "stop"
 	if collector.incomplete {
@@ -489,19 +651,19 @@ func streamChat(w http.ResponseWriter, body io.Reader, model string) error {
 		finish = "tool_calls"
 	}
 	if err := writeChunk(map[string]any{}, finish, openAIUsage(collector.usage)); err != nil {
-		return err
+		return collector.meta(), err
 	}
 	_, err = io.WriteString(w, "data: [DONE]\n\n")
-	return err
+	return collector.meta(), err
 }
 
-func collectChat(body io.Reader, model string) (map[string]any, error) {
+func collectChat(stream eventStream, model string) (map[string]any, responseMeta, error) {
 	collector := newChatCollector()
-	if err := readSSE(body, func(event sseEvent) error { return collector.consume(event, nil) }); err != nil {
-		return nil, err
+	if err := stream(func(event sseEvent) error { return collector.consume(event, nil) }); err != nil {
+		return nil, collector.meta(), err
 	}
 	if !collector.completed {
-		return nil, errors.New("upstream stream closed before response.completed")
+		return nil, collector.meta(), errors.New("upstream stream closed before response.completed")
 	}
 	message := map[string]any{"role": "assistant", "content": collector.text.String()}
 	if collector.reasoning.Len() > 0 {
@@ -530,17 +692,32 @@ func collectChat(body io.Reader, model string) (map[string]any, error) {
 		"id": "chatcmpl-" + randomID(), "object": "chat.completion", "created": time.Now().Unix(), "model": model,
 		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}},
 		"usage":   openAIUsage(collector.usage),
-	}, nil
+	}, collector.meta(), nil
 }
 
-func streamResponses(w http.ResponseWriter, body io.Reader) error {
+func streamResponses(w http.ResponseWriter, stream eventStream) (responseMeta, error) {
+	var meta responseMeta
 	terminal := false
-	err := readSSE(body, func(event sseEvent) error {
+	err := stream(func(event sseEvent) error {
 		if event.name == "response.done" {
 			event.name = "response.completed"
 			event.data["type"] = "response.completed"
 		}
-		if event.name == "response.completed" || event.name == "response.incomplete" || event.name == "response.failed" || event.name == "error" {
+		switch event.name {
+		case "response.output_item.done":
+			if item, ok := event.data["item"].(map[string]any); ok {
+				meta.items = append(meta.items, item)
+			}
+		case "response.completed", "response.incomplete":
+			terminal = true
+			response, _ := event.data["response"].(map[string]any)
+			meta.responseID, _ = response["id"].(string)
+			meta.completed = event.name == "response.completed"
+			meta.incomplete = event.name == "response.incomplete"
+			if out, ok := response["output"].([]any); ok && len(out) > 0 {
+				meta.items = out
+			}
+		case "response.failed":
 			terminal = true
 		}
 		data, err := json.Marshal(event.data)
@@ -562,39 +739,45 @@ func streamResponses(w http.ResponseWriter, body io.Reader) error {
 		})
 		_, _ = fmt.Fprintf(flushWriter{w}, "event: response.failed\ndata: %s\n\n", data)
 	}
-	return err
+	return meta, err
 }
 
-func collectResponse(body io.Reader) (map[string]any, error) {
+func collectResponse(stream eventStream) (map[string]any, responseMeta, error) {
 	var result map[string]any
+	var meta responseMeta
 	var text strings.Builder
-	var items []any
-	err := readSSE(body, func(event sseEvent) error {
+	err := stream(func(event sseEvent) error {
 		switch event.name {
 		case "response.output_text.delta":
 			delta, _ := event.data["delta"].(string)
 			text.WriteString(delta)
 		case "response.output_item.done":
 			if item, ok := event.data["item"].(map[string]any); ok {
-				items = append(items, item)
+				meta.items = append(meta.items, item)
 			}
 		case "response.completed", "response.done", "response.incomplete":
 			result, _ = event.data["response"].(map[string]any)
+			meta.responseID, _ = result["id"].(string)
+			meta.completed = event.name == "response.completed" || event.name == "response.done"
+			meta.incomplete = event.name == "response.incomplete"
+			if out, ok := result["output"].([]any); ok && len(out) > 0 {
+				meta.items = out
+			}
 		case "response.failed", "error":
 			return fmt.Errorf("Codex response failed: %s", errorMessage(event.data))
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 	if result == nil {
-		return nil, errors.New("upstream stream closed before response.completed")
+		return nil, meta, errors.New("upstream stream closed before response.completed")
 	}
 	output, _ := result["output"].([]any)
 	if len(output) == 0 {
-		if len(items) > 0 {
-			result["output"] = items
+		if len(meta.items) > 0 {
+			result["output"] = meta.items
 		} else if text.Len() > 0 {
 			result["output"] = []any{map[string]any{
 				"type": "message", "role": "assistant", "status": "completed",
@@ -605,7 +788,7 @@ func collectResponse(body io.Reader) (map[string]any, error) {
 	if _, ok := result["output_text"].(string); !ok && text.Len() > 0 {
 		result["output_text"] = text.String()
 	}
-	return result, nil
+	return result, meta, nil
 }
 
 func openAIUsage(usage map[string]any) map[string]any {

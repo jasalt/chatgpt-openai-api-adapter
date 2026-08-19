@@ -134,9 +134,9 @@ func prepareResponses(raw []byte) (map[string]any, string, bool, error) {
 	if request["service_tier"] == "fast" {
 		request["service_tier"] = "priority"
 	}
-	if previous, _ := request["previous_response_id"].(string); previous != "" {
-		return nil, "", false, errors.New("previous_response_id requires the Codex WebSocket transport, which this proxy does not implement")
-	}
+	// previous_response_id is honored on the WebSocket transport (the proxy
+	// also derives its own via continuation). When a client supplies one it is
+	// passed through unchanged and the proxy's delta logic defers to it.
 	return request, model, stream, nil
 }
 
