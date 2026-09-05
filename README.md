@@ -2,6 +2,34 @@
 
 Minimal Go proxy that allows using ChatGPT subscription via OpenAI-compatible API. Takes around 10-20MB of system RAM while in use.
 
+```
+$ chatgpt-openai-api-adapter -h
+Usage: ./chatgpt-openai-api-adapter [command]
+
+OpenAI-compatible local proxy backed by a ChatGPT subscription.
+
+Commands:
+  serve                 Start the proxy (default command).
+  login                 Sign in to ChatGPT through a browser or device code.
+  logout                Remove the saved ChatGPT credentials.
+  usage                 Show the weekly Codex rate-limit usage.
+  info                  Show saved session and access-token details.
+  resets                List banked rate-limit reset credits.
+  reset [reset-id]      List credits, or immediately consume this exact credit.
+
+Options:
+  -h, --h, --help       Show this help text.
+
+The reset command never selects a credit automatically. Run "resets" first,
+then pass its complete ID to "reset <reset-id>" to consume that limited credit.
+
+Environment:
+  CHATGPT_ADAPTER_ADDR         Proxy listen address (default 127.0.0.1:8080).
+  CHATGPT_ADAPTER_API_KEY      Optional required Bearer token for proxy clients.
+  CHATGPT_ADAPTER_AUTH_FILE    Credential file path.
+  CHATGPT_ADAPTER_SESSION_ID   Default prompt-cache/WebSocket session key.
+```
+
 ## Install
 
 Install the latest release for Linux (amd64/arm64) or Apple Silicon macOS into `~/.local/bin`:

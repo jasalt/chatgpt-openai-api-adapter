@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -61,6 +62,26 @@ func TestToolCallUsesItemIDForArgumentEvents(t *testing.T) {
 	arguments := call["function"].(map[string]any)["arguments"]
 	if arguments != `{"id":1}` {
 		t.Fatalf("arguments=%q", arguments)
+	}
+}
+
+func TestHelpFlagsPrintVerboseHelp(t *testing.T) {
+	for _, flag := range []string{"-h", "--h"} {
+		t.Run(flag, func(t *testing.T) {
+			oldArgs := os.Args
+			os.Args = []string{"adapter", flag}
+			t.Cleanup(func() { os.Args = oldArgs })
+
+			output, err := captureResetOutput(t, run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"Usage: adapter [command]", "resets", "reset [reset-id]", "CHATGPT_ADAPTER_ADDR"} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("help output missing %q:\n%s", want, output)
+				}
+			}
+		})
 	}
 }
 
