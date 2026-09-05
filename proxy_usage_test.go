@@ -79,7 +79,8 @@ func TestProxyCodexResetEndpoints(t *testing.T) {
 			if err := json.NewDecoder(request.Body).Decode(&consumed); err != nil {
 				t.Errorf("decode consume request: %v", err)
 			}
-			_, _ = io.WriteString(w, `{"result":"reset","rate_limit_windows_reset":2}`)
+			// The upstream also treats an empty object as a successful redemption.
+			_, _ = io.WriteString(w, `{}`)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}

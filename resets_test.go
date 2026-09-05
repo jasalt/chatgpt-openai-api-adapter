@@ -76,7 +76,8 @@ func TestCodexResetSendsSpecifiedCreditAndReportsSuccess(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		gotBody, _ = io.ReadAll(r.Body)
-		_, _ = io.WriteString(w, `{"result":"reset","rate_limit_windows_reset":2}`)
+		// ChatGPT may acknowledge a successful redemption with an empty object.
+		_, _ = io.WriteString(w, `{}`)
 	}))
 	defer server.Close()
 	withResetURLs(t, server)
@@ -92,7 +93,7 @@ func TestCodexResetSendsSpecifiedCreditAndReportsSuccess(t *testing.T) {
 	if request.CreditID != "credit-123" || request.RedeemRequestID == "" {
 		t.Fatalf("unexpected consume payload: %+v", request)
 	}
-	if !strings.Contains(output, "Reset credit-123 activated (2 rate-limit windows reset).") {
+	if !strings.Contains(output, "Reset credit-123 activated (0 rate-limit windows reset).") {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }

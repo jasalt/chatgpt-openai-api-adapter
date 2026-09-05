@@ -110,7 +110,13 @@ func consumeResetCredit(ctx context.Context, store *tokenStore, token, accountID
 		result = payload.Status
 	}
 	switch result {
-	case "reset", "already_redeemed", "nothing_to_reset", "no_credit":
+	case "", "reset", "already_redeemed", "nothing_to_reset", "no_credit":
+		// The consume endpoint may acknowledge a successful redemption with an
+		// empty JSON object. A successful HTTP response is the acknowledgement
+		// in that form, so normalize it for both the CLI and proxy clients.
+		if result == "" {
+			result = "reset"
+		}
 		payload.Result = result
 		return payload, nil
 	default:

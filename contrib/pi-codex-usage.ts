@@ -252,15 +252,17 @@ async function activateReset(
 			connection.native ? nativeBody : { credit_id: creditID },
 		),
 	});
-	const result = payload.result || payload.status;
+	// ChatGPT may acknowledge a successful redemption with an empty JSON
+	// object. In that response shape, the successful HTTP status is the
+	// acknowledgement; normalize it for the UI.
+	const result = payload.result || payload.status || "reset";
 	if (
-		!result ||
 		!["reset", "already_redeemed", "nothing_to_reset", "no_credit"].includes(
 			result,
 		)
 	) {
 		throw new Error(
-			`Activate Codex reset returned unexpected result: ${result || "missing"}`,
+			`Activate Codex reset returned unexpected result: ${result}`,
 		);
 	}
 	return { ...payload, result };
