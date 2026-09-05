@@ -116,6 +116,8 @@ When API returns 502 "Your session has ended. Please log in again.", login again
 - `POST /v1/chat/completions` — broad OpenAI-compatible fallback; streaming and non-streaming, tools, images, structured output, and reasoning effort
 - `GET /v1/models`
 - `GET /v1/codex/usage` — Codex rate limits and account summary for status integrations
+- `GET /v1/codex/resets` — list banked Codex rate-limit resets
+- `POST /v1/codex/reset` — activate the exact `credit_id` supplied in the JSON body
 - `GET /health`
 
 Example:
@@ -213,7 +215,7 @@ The compatibility settings above make Pi send its normal OpenAI affinity headers
 
 ### Pi Codex usage status
 
-[`contrib/pi-codex-usage.ts`](contrib/pi-codex-usage.ts) adds a `/codex-usage` command and a persistent footer item such as:
+[`contrib/pi-codex-usage.ts`](contrib/pi-codex-usage.ts) adds `/codex-usage`, `/codex-reset [reset-id]`, and a persistent footer item such as:
 
 ```text
 79%/5h (resets 16:00)  95%/w (resets 17:00 on 7 Sep)
@@ -226,7 +228,9 @@ mkdir -p ~/.pi/agent/extensions
 cp contrib/pi-codex-usage.ts ~/.pi/agent/extensions/
 ```
 
-Run `/reload` after copying it. The extension refreshes on startup, model changes, completed agent runs, and every five minutes. It uses Pi's resolved OAuth token when the selected model uses the native `openai-codex-responses` API. For an OpenAI-compatible provider, it requests `<baseUrl>/codex/usage`; this adapter serves that endpoint at `/v1/codex/usage` and applies the same optional proxy API-key authentication as its model endpoints.
+Run `/reload` after copying it. `/codex-reset` lists banked reset credits; `/codex-reset <reset-id>` activates exactly that credit and then refreshes the usage display. It never selects a credit automatically.
+
+The extension refreshes usage on startup, model changes, completed agent runs, and every five minutes. It uses Pi's resolved OAuth token when the selected model uses the native `openai-codex` provider. For an OpenAI-compatible provider, it requests `<baseUrl>/codex/usage`, `<baseUrl>/codex/resets`, or `<baseUrl>/codex/reset`; this adapter serves those endpoints under `/v1/codex/*` and applies the same optional proxy API-key authentication as its model endpoints.
 
 ### Pi manual regression check
 

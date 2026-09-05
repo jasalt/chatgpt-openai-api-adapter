@@ -1,4 +1,4 @@
-// @ts-expect-error Pi provides this module when it loads the extension.
+// @ts-expect-error -- Pi provides this module when it loads the extension.
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -6,6 +6,8 @@ import type {
 
 const STATUS_KEY = "codex-usage";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_URL =
+	"https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const REFRESH_MS = 5 * 60 * 1000;
 
@@ -35,6 +37,27 @@ type Status = {
 	account?: { email?: string; plan?: string };
 	primary?: Window;
 	weekly?: Window;
+};
+
+type ResetCredit = {
+	id: string;
+	status: string;
+	granted_at: string;
+	expires_at?: string | null;
+};
+
+type ResetCreditsPayload = { credits?: ResetCredit[] };
+type ResetResult = {
+	result?: string;
+	status?: string;
+	rate_limit_windows_reset?: number;
+};
+
+type CodexConnection = {
+	native: boolean;
+	headers: Record<string, string>;
+	baseURL?: string;
+	claims?: Claims;
 };
 
 export default function (pi: ExtensionAPI) {
@@ -83,6 +106,31 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("codex-reset", {
+		description: "List banked Codex resets or activate an exact reset ID",
+		handler: async (args: string, ctx: ExtensionContext) => {
+			try {
+				const creditID = args.trim();
+				if (!creditID) {
+					const credits = await fetchResetCredits(ctx);
+					ctx.ui.notify(formatResetCredits(credits), "info");
+					return;
+				}
+				if (/\s/.test(creditID)) {
+					throw new Error("Usage: /codex-reset [reset-id]");
+				}
+				const result = await activateReset(ctx, creditID);
+				ctx.ui.notify(formatResetResult(creditID, result), "info");
+				await refresh(ctx);
+			} catch (error) {
+				ctx.ui.notify(
+					error instanceof Error ? error.message : String(error),
+					"error",
+				);
+			}
+		},
+	});
+
 	pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
 		activeContext = ctx;
 		await refresh(ctx);
@@ -113,56 +161,130 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-async function fetchStatus(ctx: ExtensionContext): Promise<Status> {
+async function resolveCodexConnection(
+	ctx: ExtensionContext,
+): Promise<CodexConnection> {
 	const model = ctx.model;
 	if (!model) throw new Error("No model selected");
 	const auth = await ctx.modelRegistry.getProviderAuth(model.provider);
 	if (!auth?.auth.apiKey)
 		throw new Error(`No authentication available for ${model.provider}`);
+	const token = auth.auth.apiKey;
 
-	// Only the built-in provider talks directly to ChatGPT. Other providers,
-	// including codex-gateway, must be queried through their own base URL even
-	// when they happen to use the Codex Responses protocol.
 	if (model.provider === "openai-codex") {
-		const claims = decodeJWT(auth.auth.apiKey);
+		const claims = decodeJWT(token);
 		const accountID = claims["https://api.openai.com/auth"]?.chatgpt_account_id;
 		if (!accountID)
 			throw new Error("Codex access token has no ChatGPT account ID");
-		const payload = await getJSON(USAGE_URL, {
-			Authorization: `Bearer ${auth.auth.apiKey}`,
-			"ChatGPT-Account-Id": accountID,
-			originator: "pi",
-		});
-		return parseStatus(payload, {
-			email: claims.email,
-			plan: claims["https://api.openai.com/auth"]?.chatgpt_plan_type,
-		});
+		return {
+			native: true,
+			claims,
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"ChatGPT-Account-Id": accountID,
+				originator: "pi",
+			},
+		};
 	}
 
 	const baseURL = auth.auth.baseUrl ?? model.baseUrl;
 	if (!baseURL) throw new Error("Selected provider has no base URL");
-	const payload = await getJSON(`${baseURL.replace(/\/$/, "")}/codex/usage`, {
-		...(auth.auth.headers ?? {}),
-		Authorization: `Bearer ${auth.auth.apiKey}`,
-	});
+	return {
+		native: false,
+		baseURL: baseURL.replace(/\/$/, ""),
+		headers: {
+			...(auth.auth.headers ?? {}),
+			Authorization: `Bearer ${token}`,
+		},
+	};
+}
+
+async function fetchStatus(ctx: ExtensionContext): Promise<Status> {
+	const connection = await resolveCodexConnection(ctx);
+	if (connection.native) {
+		const payload = await getJSON(USAGE_URL, connection.headers);
+		return parseStatus(payload, {
+			email: connection.claims?.email,
+			plan: connection.claims?.["https://api.openai.com/auth"]?.chatgpt_plan_type,
+		});
+	}
+
+	const payload = await getJSON(
+		`${connection.baseURL}/codex/usage`,
+		connection.headers,
+	);
 	return parseStatus(payload);
+}
+
+async function fetchResetCredits(
+	ctx: ExtensionContext,
+): Promise<ResetCredit[]> {
+	const connection = await resolveCodexConnection(ctx);
+	const url = connection.native
+		? RESET_CREDITS_URL
+		: `${connection.baseURL}/codex/resets`;
+	const payload = await requestJSON<ResetCreditsPayload>(url, {
+		headers: connection.headers,
+	});
+	return [...(payload.credits ?? [])].sort((left, right) => {
+		if (!left.expires_at) return right.expires_at ? 1 : 0;
+		if (!right.expires_at) return -1;
+		return Date.parse(left.expires_at) - Date.parse(right.expires_at);
+	});
+}
+
+async function activateReset(
+	ctx: ExtensionContext,
+	creditID: string,
+): Promise<ResetResult> {
+	const connection = await resolveCodexConnection(ctx);
+	const nativeBody = {
+		redeem_request_id: crypto.randomUUID(),
+		credit_id: creditID,
+	};
+	const url = connection.native
+		? `${RESET_CREDITS_URL}/consume`
+		: `${connection.baseURL}/codex/reset`;
+	const payload = await requestJSON<ResetResult>(url, {
+		method: "POST",
+		headers: { ...connection.headers, "Content-Type": "application/json" },
+		body: JSON.stringify(
+			connection.native ? nativeBody : { credit_id: creditID },
+		),
+	});
+	const result = payload.result || payload.status;
+	if (
+		!result ||
+		!["reset", "already_redeemed", "nothing_to_reset", "no_credit"].includes(
+			result,
+		)
+	) {
+		throw new Error(
+			`Activate Codex reset returned unexpected result: ${result || "missing"}`,
+		);
+	}
+	return { ...payload, result };
 }
 
 async function getJSON(
 	url: string,
 	headers: Record<string, string>,
 ): Promise<UsagePayload> {
+	return requestJSON<UsagePayload>(url, { headers });
+}
+
+async function requestJSON<T>(url: string, init: RequestInit): Promise<T> {
 	const response = await fetch(url, {
-		headers,
+		...init,
 		signal: AbortSignal.timeout(15_000),
 	});
 	if (!response.ok) {
 		const body = (await response.text()).trim();
 		throw new Error(
-			`Codex usage request failed (HTTP ${response.status})${body ? `: ${body}` : ""}`,
+			`Codex request failed (HTTP ${response.status})${body ? `: ${body}` : ""}`,
 		);
 	}
-	return (await response.json()) as UsagePayload;
+	return (await response.json()) as T;
 }
 
 function parseStatus(payload: UsagePayload, account = payload.account): Status {
@@ -269,6 +391,36 @@ function decodeJWT(token: string): Claims {
 	} catch (error) {
 		throw new Error("Could not decode Codex access token", { cause: error });
 	}
+}
+
+function formatResetCredits(credits: ResetCredit[]): string {
+	if (credits.length === 0) return "No banked rate-limit reset credits.";
+	const lines = ["Banked Codex rate-limit resets:"];
+	for (const credit of credits) {
+		const granted = formatCreditTime(credit.granted_at);
+		const expires = credit.expires_at
+			? formatCreditTime(credit.expires_at)
+			: "never/unknown";
+		lines.push(
+			`${credit.id}  ${credit.status}  granted ${granted}  expires ${expires}`,
+		);
+	}
+	lines.push("Activate one with /codex-reset <reset-id>.");
+	return lines.join("\n");
+}
+
+function formatResetResult(creditID: string, payload: ResetResult): string {
+	const result = payload.result || payload.status || "unknown";
+	const windows = payload.rate_limit_windows_reset ?? 0;
+	return result === "reset"
+		? `Reset ${creditID} activated (${windows} rate-limit windows reset).`
+		: `Reset ${creditID} result: ${result} (${windows} rate-limit windows reset).`;
+}
+
+function formatCreditTime(value: string): string {
+	const date = new Date(value);
+	if (!Number.isFinite(date.getTime())) return value;
+	return `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 function titleWord(value: string): string {

@@ -66,6 +66,49 @@ func TestProxyCodexUsageEndpoint(t *testing.T) {
 	}
 }
 
+func TestProxyCodexResetEndpoints(t *testing.T) {
+	var consumed resetConsumeRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer test-token" || request.Header.Get("ChatGPT-Account-Id") != "test-account" {
+			t.Errorf("unexpected upstream authentication")
+		}
+		switch request.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"credits":[{"id":"credit-1","status":"available","granted_at":"2026-08-20T12:00:00Z","expires_at":"2026-09-20T12:00:00Z"}]}`)
+		case http.MethodPost:
+			if err := json.NewDecoder(request.Body).Decode(&consumed); err != nil {
+				t.Errorf("decode consume request: %v", err)
+			}
+			_, _ = io.WriteString(w, `{"result":"reset","rate_limit_windows_reset":2}`)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer upstream.Close()
+	withResetURLs(t, upstream)
+	store := testResetStore(upstream.Client())
+	server := newProxyServer(store, upstream.Client(), "secret")
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/v1/codex/resets", nil)
+	listRequest.Header.Set("Authorization", "Bearer secret")
+	listResponse := httptest.NewRecorder()
+	server.routes().ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), `"id":"credit-1"`) {
+		t.Fatalf("list status=%d body=%s", listResponse.Code, listResponse.Body.String())
+	}
+
+	consumeRequest := httptest.NewRequest(http.MethodPost, "/v1/codex/reset", strings.NewReader(`{"credit_id":"credit-1"}`))
+	consumeRequest.Header.Set("Authorization", "Bearer secret")
+	consumeResponse := httptest.NewRecorder()
+	server.routes().ServeHTTP(consumeResponse, consumeRequest)
+	if consumeResponse.Code != http.StatusOK || !strings.Contains(consumeResponse.Body.String(), `"result":"reset"`) {
+		t.Fatalf("consume status=%d body=%s", consumeResponse.Code, consumeResponse.Body.String())
+	}
+	if consumed.CreditID != "credit-1" || consumed.RedeemRequestID == "" {
+		t.Fatalf("upstream consume request = %+v", consumed)
+	}
+}
+
 func TestProxyCodexUsageEndpointRequiresProxyKey(t *testing.T) {
 	server := newProxyServer(&tokenStore{}, http.DefaultClient, "secret")
 	request := httptest.NewRequest(http.MethodGet, "/v1/codex/usage", nil)

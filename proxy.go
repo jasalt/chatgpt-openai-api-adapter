@@ -62,6 +62,8 @@ func (s *proxyServer) routes() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.models))
 	mux.HandleFunc("GET /v1/codex/usage", s.requireAPIKey(s.codexUsage))
+	mux.HandleFunc("GET /v1/codex/resets", s.requireAPIKey(s.codexResetCredits))
+	mux.HandleFunc("POST /v1/codex/reset", s.requireAPIKey(s.codexResetConsume))
 	mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.chat))
 	mux.HandleFunc("POST /v1/responses", s.requireAPIKey(s.responses))
 	return mux
@@ -107,6 +109,53 @@ func (s *proxyServer) codexUsage(w http.ResponseWriter, r *http.Request) {
 		if len(account) > 0 {
 			payload["account"] = account
 		}
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *proxyServer) codexResetCredits(w http.ResponseWriter, r *http.Request) {
+	if !s.store.authenticated() {
+		writeOpenAIError(w, http.StatusUnauthorized, "not_logged_in", "No saved ChatGPT login")
+		return
+	}
+	token, accountID, err := s.store.token(r.Context(), false)
+	if err != nil {
+		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", err.Error())
+		return
+	}
+	payload, err := fetchResetCredits(r.Context(), s.store, token, accountID)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *proxyServer) codexResetConsume(w http.ResponseWriter, r *http.Request) {
+	if !s.store.authenticated() {
+		writeOpenAIError(w, http.StatusUnauthorized, "not_logged_in", "No saved ChatGPT login")
+		return
+	}
+	var request struct {
+		CreditID string `json:"credit_id"`
+	}
+	body, ok := readRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := json.Unmarshal(body, &request); err != nil || strings.TrimSpace(request.CreditID) == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "credit_id is required")
+		return
+	}
+	token, accountID, err := s.store.token(r.Context(), false)
+	if err != nil {
+		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", err.Error())
+		return
+	}
+	payload, err := consumeResetCredit(r.Context(), s.store, token, accountID, request.CreditID)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

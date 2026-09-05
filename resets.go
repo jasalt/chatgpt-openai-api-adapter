@@ -42,6 +42,25 @@ type resetConsumeResponse struct {
 	RateLimitWindowsReset int    `json:"rate_limit_windows_reset"`
 }
 
+// fetchResetCredits retrieves the reset credits available to an account.
+func fetchResetCredits(ctx context.Context, store *tokenStore, token, accountID string) (resetCreditsResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resetCreditsURL, nil)
+	if err != nil {
+		return resetCreditsResponse{}, err
+	}
+	setResetHeaders(req, token, accountID)
+	resp, err := store.client.Do(req)
+	if err != nil {
+		return resetCreditsResponse{}, fmt.Errorf("reset credits request: %w", err)
+	}
+	var payload resetCreditsResponse
+	if err := decodeResetResponse(resp, &payload, "reset credits"); err != nil {
+		return resetCreditsResponse{}, err
+	}
+	sortResetCredits(payload.Credits)
+	return payload, nil
+}
+
 // codexResets lists the reset credits available to the logged-in ChatGPT account.
 func codexResets(ctx context.Context, store *tokenStore) error {
 	if !store.authenticated() {
@@ -51,59 +70,40 @@ func codexResets(ctx context.Context, store *tokenStore) error {
 	if err != nil {
 		return err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resetCreditsURL, nil)
+	payload, err := fetchResetCredits(ctx, store, token, accountID)
 	if err != nil {
 		return err
 	}
-	setResetHeaders(req, token, accountID)
-	resp, err := store.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("reset credits request: %w", err)
-	}
-	var payload resetCreditsResponse
-	if err := decodeResetResponse(resp, &payload, "reset credits"); err != nil {
-		return err
-	}
-
-	sortResetCredits(payload.Credits)
 	printResetCredits(payload.Credits)
 	return nil
 }
 
-// codexReset redeems precisely creditID. It never chooses a replacement credit.
-func codexReset(ctx context.Context, store *tokenStore, creditID string) error {
-	if !store.authenticated() {
-		return fmt.Errorf("no saved login found; run `%s login`", progName())
-	}
+// consumeResetCredit redeems precisely creditID. It never chooses a replacement credit.
+func consumeResetCredit(ctx context.Context, store *tokenStore, token, accountID, creditID string) (resetConsumeResponse, error) {
 	if creditID == "" {
-		return fmt.Errorf("reset credit ID must not be empty")
-	}
-	token, accountID, err := store.token(ctx, false)
-	if err != nil {
-		return err
+		return resetConsumeResponse{}, fmt.Errorf("reset credit ID must not be empty")
 	}
 	redeemID, err := newRedeemRequestID()
 	if err != nil {
-		return fmt.Errorf("generate redeem request ID: %w", err)
+		return resetConsumeResponse{}, fmt.Errorf("generate redeem request ID: %w", err)
 	}
 	body, err := json.Marshal(resetConsumeRequest{RedeemRequestID: redeemID, CreditID: creditID})
 	if err != nil {
-		return err
+		return resetConsumeResponse{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resetConsumeURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return resetConsumeResponse{}, err
 	}
 	setResetHeaders(req, token, accountID)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := store.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("consume reset credit: %w", err)
+		return resetConsumeResponse{}, fmt.Errorf("consume reset credit: %w", err)
 	}
 	var payload resetConsumeResponse
 	if err := decodeResetResponse(resp, &payload, "consume reset credit"); err != nil {
-		return err
+		return resetConsumeResponse{}, err
 	}
 	result := payload.Result
 	if result == "" {
@@ -111,9 +111,27 @@ func codexReset(ctx context.Context, store *tokenStore, creditID string) error {
 	}
 	switch result {
 	case "reset", "already_redeemed", "nothing_to_reset", "no_credit":
+		payload.Result = result
+		return payload, nil
 	default:
-		return fmt.Errorf("consume reset credit: unexpected result %q", result)
+		return resetConsumeResponse{}, fmt.Errorf("consume reset credit: unexpected result %q", result)
 	}
+}
+
+// codexReset redeems precisely creditID. It never chooses a replacement credit.
+func codexReset(ctx context.Context, store *tokenStore, creditID string) error {
+	if !store.authenticated() {
+		return fmt.Errorf("no saved login found; run `%s login`", progName())
+	}
+	token, accountID, err := store.token(ctx, false)
+	if err != nil {
+		return err
+	}
+	payload, err := consumeResetCredit(ctx, store, token, accountID, creditID)
+	if err != nil {
+		return err
+	}
+	result := payload.Result
 
 	if result == "reset" {
 		fmt.Printf("Reset %s activated (%d rate-limit windows reset).\n", creditID, payload.RateLimitWindowsReset)
