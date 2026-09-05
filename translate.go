@@ -35,6 +35,12 @@ func chatToResponses(raw []byte) (map[string]any, string, bool, error) {
 				instructions += text
 			}
 		case "assistant":
+			// Chat Completions has several non-standard reasoning fields. Preserve
+			// them as a Responses reasoning item before the assistant message so a
+			// client that resends history does not lose its prior reasoning state.
+			if reasoning := chatReasoningItem(msg); reasoning != nil {
+				input = append(input, reasoning)
+			}
 			text := contentText(msg["content"])
 			calls, _ := msg["tool_calls"].([]any)
 			legacy, _ := msg["function_call"].(map[string]any)
@@ -138,6 +144,59 @@ func prepareResponses(raw []byte) (map[string]any, string, bool, error) {
 	// also derives its own via continuation). When a client supplies one it is
 	// passed through unchanged and the proxy's delta logic defers to it.
 	return request, model, stream, nil
+}
+
+// chatReasoningItem translates the reasoning fields used by OpenAI-compatible
+// Chat Completions clients into the Responses input-item representation. A
+// summary is replayable context, while encrypted_content (when supplied) is
+// retained verbatim for backends that require it to continue reasoning.
+func chatReasoningItem(message map[string]any) map[string]any {
+	item := map[string]any{"type": "reasoning"}
+	var summaries []any
+	addSummary := func(value any) {
+		if text := contentText(value); text != "" {
+			summaries = append(summaries, map[string]any{"type": "summary_text", "text": text})
+		}
+	}
+	for _, key := range []string{"reasoning_content", "reasoning_text"} {
+		addSummary(message[key])
+	}
+	if reasoning, ok := message["reasoning"].(map[string]any); ok {
+		if encrypted, ok := reasoning["encrypted_content"].(string); ok && encrypted != "" {
+			item["encrypted_content"] = encrypted
+		}
+		if summary, ok := reasoning["summary"].([]any); ok {
+			item["summary"] = summary
+		} else {
+			addSummary(reasoning["text"])
+		}
+	} else {
+		addSummary(message["reasoning"])
+	}
+	if details, ok := message["reasoning_details"].([]any); ok {
+		for _, raw := range details {
+			detail, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if encrypted, ok := detail["encrypted_content"].(string); ok && encrypted != "" {
+				item["encrypted_content"] = encrypted
+			}
+			addSummary(detail["text"])
+			addSummary(detail["summary"])
+		}
+	}
+	if len(summaries) > 0 {
+		if _, exists := item["summary"]; !exists {
+			item["summary"] = summaries
+		}
+	}
+	if _, hasSummary := item["summary"]; !hasSummary {
+		if _, hasEncrypted := item["encrypted_content"]; !hasEncrypted {
+			return nil
+		}
+	}
+	return item
 }
 
 func stringValue(value any) string {

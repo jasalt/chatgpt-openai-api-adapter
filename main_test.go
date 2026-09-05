@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -45,6 +46,112 @@ func TestChatTranslationAndCollection(t *testing.T) {
 	message := choice["message"].(map[string]any)
 	if message["content"] != "hi" || response["usage"].(map[string]any)["total_tokens"] != int64(3) {
 		t.Fatalf("bad response: %#v", response)
+	}
+}
+
+func TestChatReasoningTranslationAndCollection(t *testing.T) {
+	raw := []byte(`{"model":"gpt-5.6-luna","reasoning_effort":"high","messages":[{"role":"user","content":"u"},{"role":"assistant","reasoning_content":"plan","reasoning_details":[{"type":"reasoning.encrypted","encrypted_content":"cipher"}],"content":"a"}]}`)
+	request, _, _, err := chatToResponses(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning := request["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" || reasoning["summary"] != "auto" {
+		t.Fatalf("reasoning request=%#v", reasoning)
+	}
+	input := request["input"].([]any)
+	item := input[1].(map[string]any)
+	if item["type"] != "reasoning" || item["encrypted_content"] != "cipher" {
+		t.Fatalf("reasoning history was not preserved: %#v", input)
+	}
+	summary := item["summary"].([]any)[0].(map[string]any)
+	if summary["text"] != "plan" {
+		t.Fatalf("reasoning summary=%#v", item)
+	}
+
+	withoutReasoning, _, _, err := chatToResponses([]byte(`{"model":"m","messages":[{"role":"user","content":"u"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := withoutReasoning["reasoning"]; ok {
+		t.Fatalf("unexpected reasoning request: %#v", withoutReasoning)
+	}
+
+	sse := strings.NewReader("event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"think \"}\n\n" +
+		"event: response.output_text.delta\ndata: {\"delta\":\"answer\"}\n\n" +
+		"event: response.reasoning_text.delta\ndata: {\"delta\":\"more\"}\n\n" +
+		"event: response.completed\ndata: {\"response\":{\"usage\":{}}}\n\n")
+	response, _, err := collectChat(fromReader(sse), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := response["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if message["content"] != "answer" || message["reasoning_content"] != "think more" {
+		t.Fatalf("reasoning collection=%#v", message)
+	}
+}
+
+func TestChatReasoningStreaming(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	sse := strings.NewReader("event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"think\"}\n\n" +
+		"event: response.output_text.delta\ndata: {\"delta\":\"answer\"}\n\n" +
+		"event: response.completed\ndata: {\"response\":{\"usage\":{}}}\n\n")
+	if _, err := streamChat(recorder, fromReader(sse), "m"); err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"reasoning_content":"think"`) || !strings.Contains(body, `"content":"answer"`) {
+		t.Fatalf("stream did not preserve deltas:\n%s", body)
+	}
+}
+
+func TestResponsesReasoningPassthrough(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	sse := strings.NewReader("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"cipher\"}}\n\n" +
+		"event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"r1\",\"delta\":\"plan\"}\n\n" +
+		"event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"r1\",\"delta\":\"detail\"}\n\n" +
+		"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"cipher\"}}\n\n" +
+		"event: response.done\ndata: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n")
+	meta, err := streamResponses(recorder, fromReader(sse))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{"response.output_item.added", "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "encrypted_content", "event: response.completed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Responses event %q missing:\n%s", want, body)
+		}
+	}
+	if meta.responseID != "resp_1" || !meta.completed || len(meta.items) != 1 {
+		t.Fatalf("response meta=%#v", meta)
+	}
+}
+
+func TestSessionIDPiHeaderPrecedence(t *testing.T) {
+	server := &proxyServer{sessionID: "default"}
+	for _, test := range []struct{ name, header, want string }{
+		{"session_id", "session_id", "sid"},
+		{"client request id", "X-Client-Request-Id", "request"},
+		{"session affinity", "X-Session-Affinity", "affinity"},
+		{"session id", "X-Session-Id", "session"},
+		{"prompt cache", "X-Prompt-Cache-Key", "cache"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/", nil)
+			r.Header.Set(test.header, test.want)
+			if got := server.resolveSessionID(r); got != test.want {
+				t.Fatalf("got %q, want %q", got, test.want)
+			}
+		})
+	}
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("X-Client-Request-Id", "request")
+	r.Header.Set("X-Session-Affinity", "affinity")
+	r.Header.Set("session_id", "sid")
+	r.Header.Set("X-Prompt-Cache-Key", "cache")
+	r.Header.Set("X-Session-Id", "session")
+	if got := server.resolveSessionID(r); got != "session" {
+		t.Fatalf("precedence got %q", got)
 	}
 }
 
@@ -274,16 +381,16 @@ func TestResponseOutputToInputItems(t *testing.T) {
 		map[string]any{"type": "reasoning", "id": "r1"},
 	}
 	chat := responseOutputToInputItems(output, true)
-	if len(chat) != 2 {
-		t.Fatalf("chat form should drop reasoning: %#v", chat)
+	if len(chat) != 3 {
+		t.Fatalf("chat form should preserve reasoning: %#v", chat)
 	}
 	if chat[0].(map[string]any)["role"] != "assistant" || chat[0].(map[string]any)["content"] != "hello" {
 		t.Fatalf("message not converted to chat input form: %#v", chat[0])
 	}
-	if chat[1].(map[string]any)["type"] != "function_call" {
-		t.Fatalf("function_call not preserved: %#v", chat[1])
+	if chat[1].(map[string]any)["type"] != "function_call" || chat[2].(map[string]any)["type"] != "reasoning" {
+		t.Fatalf("chat items not preserved: %#v", chat)
 	}
-	// Native form keeps reasoning.
+	// Native form also keeps reasoning.
 	native := responseOutputToInputItems(output, false)
 	if len(native) != 3 {
 		t.Fatalf("native form should keep reasoning: %#v", native)

@@ -27,8 +27,9 @@ type continuationState struct {
 //
 // forChat selects the shape produced by chatToResponses (assistant messages
 // become {role,content:<string>}); for native Responses (forChat=false) the
-// same normalization is applied so client and server shapes align, while
-// reasoning items are retained (native clients may resend them).
+// same normalization is applied so client and server shapes align. Reasoning
+// items are retained for both paths: chatToResponses now reconstructs them
+// from compatible Chat Completions reasoning fields.
 func responseOutputToInputItems(output []any, forChat bool) []any {
 	items := make([]any, 0, len(output))
 	for _, raw := range output {
@@ -46,9 +47,7 @@ func responseOutputToInputItems(output []any, forChat bool) []any {
 		case "function_call":
 			items = append(items, normalizeInputItem(item))
 		case "reasoning", "reasoning_summary":
-			if !forChat {
-				items = append(items, item)
-			}
+			items = append(items, item)
 		default:
 			if !forChat {
 				items = append(items, item)

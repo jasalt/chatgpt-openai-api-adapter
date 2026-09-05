@@ -384,12 +384,15 @@ func randomID() string {
 }
 
 // resolveSessionID returns the prompt-cache/session identifier for a request.
-// Clients may override the proxy's default session by sending an X-Session-Id
-// (or X-Prompt-Cache-Key) header; this keeps separate conversations in
-// separate cache namespaces and is required for WebSocket continuation.
-// Otherwise the proxy-wide default session ID is used.
+// Clients may override the proxy's default session by sending one of Pi's
+// OpenAI-compatible affinity headers. This keeps separate conversations in
+// separate cache namespaces and enables WebSocket continuation. Otherwise the
+// proxy-wide default session ID is used.
 func (s *proxyServer) resolveSessionID(r *http.Request) string {
-	for _, header := range []string{"X-Session-Id", "X-Prompt-Cache-Key"} {
+	for _, header := range []string{
+		"X-Session-Id", "X-Prompt-Cache-Key", "session_id",
+		"X-Session-Affinity", "X-Client-Request-Id",
+	} {
 		if key := strings.TrimSpace(r.Header.Get(header)); key != "" {
 			return clampPromptCacheKey(key)
 		}
