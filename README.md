@@ -31,7 +31,11 @@ Commands:
 ./chatgpt-openai-api-adapter login
 ./chatgpt-openai-api-adapter serve
 ./chatgpt-openai-api-adapter logout
+./chatgpt-openai-api-adapter resets
+./chatgpt-openai-api-adapter reset <reset-id>
 ```
+
+`reset <reset-id>` immediately consumes that limited banked reset credit. It never selects a credit automatically; use `resets` first to inspect exact IDs and expiration times.
 
 Configuration:
 
@@ -112,6 +116,7 @@ Both mechanisms are functionally effective (verified: with WebSocket continuatio
 ## Example LLM client config
 
 [Emacs gptel](https://deepwiki.com/karthink/gptel):
+
 ```elisp
 (gptel-make-openai "codex-proxy"
   :host "localhost:8080"
@@ -127,6 +132,7 @@ Both mechanisms are functionally effective (verified: with WebSocket continuatio
 ```
 
 [Pi coding agent]() `~/.pi/agent/models.json`:
+
 ```json
 {
   "providers": {
@@ -174,5 +180,5 @@ Developed & tested on Fedora 44 Workstation, should work where recent enough Gol
 
 ## Reference projects
 
-- https://github.com/earendil-works/pi/tree/main/packages/ai
-- https://github.com/icebear0828/codex-proxy
+- <https://github.com/earendil-works/pi/tree/main/packages/ai>
+- <https://github.com/icebear0828/codex-proxy>

@@ -44,6 +44,19 @@ func run() error {
 		return codexUsage(ctx, store)
 	case "info":
 		return codexInfo(ctx, store)
+	case "resets":
+		if len(os.Args) != 2 {
+			return fmt.Errorf("resets does not accept arguments")
+		}
+		return codexResets(ctx, store)
+	case "reset":
+		if len(os.Args) < 3 {
+			return codexResets(ctx, store)
+		}
+		if len(os.Args) > 3 {
+			return fmt.Errorf("reset accepts at most one reset ID")
+		}
+		return codexReset(ctx, store, os.Args[2])
 	case "serve":
 		if !store.authenticated() {
 			fmt.Println("No saved login found; starting interactive login.")
@@ -76,6 +89,6 @@ func run() error {
 		}
 		return err
 	default:
-		return fmt.Errorf("unknown command %q (use serve, login, logout, info, or usage)", command)
+		return fmt.Errorf("unknown command %q (use serve, login, logout, info, usage, reset, or resets)", command)
 	}
 }
