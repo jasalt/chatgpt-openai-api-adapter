@@ -81,6 +81,37 @@ func abs64(n int64) int64 {
 	return n
 }
 
+// fetchUsagePayload retrieves the usage document for the current account.
+func fetchUsagePayload(ctx context.Context, store *tokenStore, token, accountID string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("ChatGPT-Account-Id", accountID)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("originator", "pi")
+
+	resp, err := store.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("usage request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("ChatGPT usage request failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("parse usage response: %w", err)
+	}
+	return payload, nil
+}
+
 // codexUsage fetches the ChatGPT Codex weekly usage for the currently logged
 // in session and prints a human-readable summary.
 func codexUsage(ctx context.Context, store *tokenStore) error {
@@ -91,32 +122,9 @@ func codexUsage(ctx context.Context, store *tokenStore) error {
 	if err != nil {
 		return err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	payload, err := fetchUsagePayload(ctx, store, token, accountID)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("ChatGPT-Account-Id", accountID)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("originator", "pi")
-
-	resp, err := store.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("usage request: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("ChatGPT usage request failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return fmt.Errorf("parse usage response: %w", err)
 	}
 
 	window, ok := weeklyWindow(payload)

@@ -2,7 +2,7 @@
 
 Minimal Go proxy that allows using ChatGPT subscription via OpenAI-compatible API. Takes around 10-20MB of system RAM while in use.
 
-```
+```text
 $ chatgpt-openai-api-adapter -h
 Usage: ./chatgpt-openai-api-adapter [command]
 
@@ -13,6 +13,7 @@ Commands:
   login                 Sign in to ChatGPT through a browser or device code.
   logout                Remove the saved ChatGPT credentials.
   usage                 Show the weekly Codex rate-limit usage.
+  status                Show account and Codex rate-limit status.
   info                  Show saved session and access-token details.
   resets                List banked rate-limit reset credits.
   reset [reset-id]      List credits, or immediately consume this exact credit.
@@ -57,6 +58,7 @@ Commands:
 
 ```bash
 ./chatgpt-openai-api-adapter login
+./chatgpt-openai-api-adapter status
 ./chatgpt-openai-api-adapter serve
 ./chatgpt-openai-api-adapter logout
 ./chatgpt-openai-api-adapter resets
@@ -72,7 +74,7 @@ Configuration:
 | `CHATGPT_ADAPTER_ADDR`      | `127.0.0.1:8080`                      | Listen address                                       |
 | `CHATGPT_ADAPTER_API_KEY`   | empty                                 | Optional API key clients must send as a Bearer token |
 | `CHATGPT_ADAPTER_AUTH_FILE` | ~/.config/chatgpt-openai-api-adapter/ | Credential file path                                 |
-| `CHATGPT_ADAPTER_SESSION_ID`| random per start                      | Default prompt-cache / WebSocket session key when a client sends no `X-Session-Id` |
+| `CHATGPT_ADAPTER_SESSION_ID` | random per start                      | Default prompt-cache / WebSocket session key when a client sends no `X-Session-Id` |
 
 A non-loopback listener requires `CHATGPT_ADAPTER_API_KEY`.
 

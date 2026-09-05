@@ -53,6 +53,11 @@ func run() error {
 		return nil
 	case "usage":
 		return codexUsage(ctx, store)
+	case "status":
+		if len(os.Args) != 2 {
+			return fmt.Errorf("status does not accept arguments")
+		}
+		return codexStatus(ctx, store)
 	case "info":
 		return codexInfo(ctx, store)
 	case "resets":
@@ -114,6 +119,7 @@ Commands:
   login                 Sign in to ChatGPT through a browser or device code.
   logout                Remove the saved ChatGPT credentials.
   usage                 Show the weekly Codex rate-limit usage.
+  status                Show account and Codex rate-limit status.
   info                  Show saved session and access-token details.
   resets                List banked rate-limit reset credits.
   reset [reset-id]      List credits, or immediately consume this exact credit.
