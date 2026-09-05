@@ -110,8 +110,8 @@ When API returns 502 "Your session has ended. Please log in again.", login again
 
 ## API
 
-- `POST /v1/chat/completions` — streaming and non-streaming, tools, images, structured output, reasoning effort
-- `POST /v1/responses` — streaming and non-streaming Responses API
+- `POST /v1/responses` — **recommended for Pi**; streaming and non-streaming Responses API with native reasoning events
+- `POST /v1/chat/completions` — broad OpenAI-compatible fallback; streaming and non-streaming, tools, images, structured output, and reasoning effort
 - `GET /v1/models`
 - `GET /health`
 
@@ -127,7 +127,7 @@ OpenAI SDKs can use `http://127.0.0.1:8080/v1` as their base URL. If no proxy AP
 
 `previous_response_id` is honored: when a client sends it (native `/v1/responses`), the proxy passes it through. When omitted, the proxy derives one automatically via WebSocket continuation (see [Prompt caching](#prompt-caching) below).
 
-Clients may send an `X-Session-Id` (or `X-Prompt-Cache-Key`) header to pin a cache/continuation namespace per conversation; without it the proxy-wide default (`CHATGPT_ADAPTER_SESSION_ID` or a random value) is used.
+Clients may send `X-Session-Id`, `X-Prompt-Cache-Key`, `session_id`, `X-Session-Affinity`, or `X-Client-Request-Id` to pin a cache/continuation namespace per conversation; without one the proxy-wide default (`CHATGPT_ADAPTER_SESSION_ID` or a random value) is used. The precedence order is the order listed. Pi's normal `session_id` and `x-client-request-id` affinity headers therefore enable continuation without custom headers.
 
 ## Prompt caching
 
@@ -135,7 +135,7 @@ The proxy uses two complementary mechanisms to reduce repeated token billing, mi
 
 1. **Static-prefix cache (`prompt_cache_key`)** — every upstream request carries a stable `prompt_cache_key` plus `session-id`/`x-client-request-id` headers. Requests sharing the same key and an identical system/tools prefix reuse cached tokens. This works over both SSE and WebSocket and requires no client cooperation. The OpenAI prompt cache only engages for prefixes above ~1024 tokens, so small requests show no caching.
 
-2. **Conversation-history cache (WebSocket continuation)** — when a client supplies an `X-Session-Id`, the proxy opens a pooled WebSocket to `wss://chatgpt.com/backend-api/codex/responses` and, from the second turn on, sends only the *delta* (new input items) plus `previous_response_id` instead of the full conversation. The Codex backend replays the prior turns from server-side state, so the history is not re-transmitted or re-billed as fresh input. Each `X-Session-Id` gets its own cached connection; concurrent requests on the same session open one-off sockets so streams are never multiplexed on a shared connection. Different session IDs are fully isolated. Without an `X-Session-Id` the proxy falls back to SSE (static-prefix caching only).
+2. **Conversation-history cache (WebSocket continuation)** — when a client supplies any supported session-affinity header (`X-Session-Id`, `X-Prompt-Cache-Key`, `session_id`, `X-Session-Affinity`, or `X-Client-Request-Id`), the proxy opens a pooled WebSocket to `wss://chatgpt.com/backend-api/codex/responses` and, from the second turn on, sends only the *delta* (new input items) plus `previous_response_id` instead of the full conversation. The Codex backend replays the prior turns from server-side state, so the history is not re-transmitted or re-billed as fresh input. Each session ID gets its own cached connection; concurrent requests on the same session open one-off sockets so streams are never multiplexed on a shared connection. Different session IDs are fully isolated. Without an affinity header the proxy falls back to SSE (static-prefix caching only).
 
 ### Accounting difference vs Pi's native OAuth path
 
@@ -159,18 +159,19 @@ Both mechanisms are functionally effective (verified: with WebSocket continuatio
                   '(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna)))
 ```
 
-[Pi coding agent]() `~/.pi/agent/models.json`:
+[Pi coding agent](https://github.com/earendil-works/pi) `~/.pi/agent/models.json`:
 
 ```json
 {
   "providers": {
     "codex-gateway": {
       "baseUrl": "http://localhost:11400/v1",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "apiKey": "CHANGEME",
       "compat": {
-       "sendSessionAffinityHeaders": true,
-       "supportsLongCacheRetention": true
+        "sendSessionAffinityHeaders": true,
+        "sessionAffinityFormat": "openai",
+        "supportsLongCacheRetention": true
       },
       "cacheRetention": "long",
       "models": [
@@ -178,25 +179,41 @@ Both mechanisms are functionally effective (verified: with WebSocket continuatio
           "id": "gpt-5.6-sol",
           "name": "GPT-5.6 Sol",
           "input": ["text", "image"],
-          "contextWindow": 272000
+          "contextWindow": 272000,
+          "reasoning": true
         },
         {
           "id": "gpt-5.6-terra",
           "name": "GPT-5.6 Terra",
           "input": ["text", "image"],
-          "contextWindow": 272000
+          "contextWindow": 272000,
+          "reasoning": true
         },
         {
           "id": "gpt-5.6-luna",
           "name": "GPT-5.6 Luna",
           "input": ["text", "image"],
-          "contextWindow": 272000
+          "contextWindow": 272000,
+          "reasoning": true
         }
       ]
     }
   }
 }
 ```
+
+`reasoning: true` exposes Pi's non-`off` thinking levels for these models. Selecting a level such as `high` sends `reasoning_effort: "high"`; the adapter translates this to Codex's `reasoning: {"effort":"high","summary":"auto"}` request and Pi receives native Responses reasoning events as thinking deltas. The listed models support Pi's standard `minimal`, `low`, `medium`, `high`, and `xhigh` levels (Pi clamps a level if a model later declares a narrower range).
+
+`openai-responses` is the preferred integration: reasoning items, summary deltas, encrypted reasoning content, tool calls, and multi-turn history retain their Responses structure. `openai-completions` remains available for clients requiring that API; it maps upstream reasoning deltas to Chat Completions `reasoning_content`, which Pi renders as thinking output.
+
+The compatibility settings above make Pi send its normal OpenAI affinity headers (`session_id` and `x-client-request-id`). They activate the adapter's WebSocket continuation automatically. The adapter accepts either header, as well as the other documented affinity-header forms.
+
+### Pi manual regression check
+
+1. Start the adapter and install the configuration above. Select one of the listed models and a non-`off` thinking level (for example `high`). Confirm that Pi renders thinking output, then invoke a tool and continue with a second turn; the tool call and the continued conversation should both remain valid.
+2. For fallback coverage, temporarily change `api` to `openai-completions`, keep `reasoning: true`, and repeat. The same thinking output should arrive through streamed `reasoning_content` deltas.
+
+Compared with Pi's native `openai-codex` provider, the adapter uses the local HTTP bridge and the backend may account server-retrieved continuation context as ordinary input tokens rather than cache reads; see [Accounting difference vs Pi's native OAuth path](#accounting-difference-vs-pis-native-oauth-path).
 
 ## Vibe coding disclaimer / warranty / roadmap
 
