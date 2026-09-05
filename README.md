@@ -115,6 +115,7 @@ When API returns 502 "Your session has ended. Please log in again.", login again
 - `POST /v1/responses` — **recommended for Pi**; streaming and non-streaming Responses API with native reasoning events
 - `POST /v1/chat/completions` — broad OpenAI-compatible fallback; streaming and non-streaming, tools, images, structured output, and reasoning effort
 - `GET /v1/models`
+- `GET /v1/codex/usage` — Codex rate limits and account summary for status integrations
 - `GET /health`
 
 Example:
@@ -209,6 +210,23 @@ Both mechanisms are functionally effective (verified: with WebSocket continuatio
 `openai-responses` is the preferred integration: reasoning items, summary deltas, encrypted reasoning content, tool calls, and multi-turn history retain their Responses structure. `openai-completions` remains available for clients requiring that API; it maps upstream reasoning deltas to Chat Completions `reasoning_content`, which Pi renders as thinking output.
 
 The compatibility settings above make Pi send its normal OpenAI affinity headers (`session_id` and `x-client-request-id`). They activate the adapter's WebSocket continuation automatically. The adapter accepts either header, as well as the other documented affinity-header forms.
+
+### Pi Codex usage status
+
+[`contrib/pi-codex-usage.ts`](contrib/pi-codex-usage.ts) adds a `/codex-usage` command and a persistent footer item such as:
+
+```text
+79%/5h (resets 16:00)  95%/w (resets 17:00 on 7 Sep)
+```
+
+Install it globally so it follows you across projects:
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp contrib/pi-codex-usage.ts ~/.pi/agent/extensions/
+```
+
+Run `/reload` after copying it. The extension refreshes on startup, model changes, completed agent runs, and every five minutes. It uses Pi's resolved OAuth token when the selected model uses the native `openai-codex-responses` API. For an OpenAI-compatible provider, it requests `<baseUrl>/codex/usage`; this adapter serves that endpoint at `/v1/codex/usage` and applies the same optional proxy API-key authentication as its model endpoints.
 
 ### Pi manual regression check
 

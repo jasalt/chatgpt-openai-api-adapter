@@ -61,6 +61,7 @@ func (s *proxyServer) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.models))
+	mux.HandleFunc("GET /v1/codex/usage", s.requireAPIKey(s.codexUsage))
 	mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.chat))
 	mux.HandleFunc("POST /v1/responses", s.requireAPIKey(s.responses))
 	return mux
@@ -77,6 +78,37 @@ func (s *proxyServer) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func (s *proxyServer) codexUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.store.authenticated() {
+		writeOpenAIError(w, http.StatusUnauthorized, "not_logged_in", "No saved ChatGPT login")
+		return
+	}
+	token, accountID, err := s.store.token(r.Context(), false)
+	if err != nil {
+		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", err.Error())
+		return
+	}
+	payload, err := fetchUsagePayload(r.Context(), s.store, token, accountID)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	claims, err := decodeJWTPayload(token)
+	if err == nil {
+		account := map[string]string{}
+		if email, ok := stringClaim(claims, "email"); ok {
+			account["email"] = email
+		}
+		if plan := authClaimString(claims, "chatgpt_plan_type"); plan != "" {
+			account["plan"] = plan
+		}
+		if len(account) > 0 {
+			payload["account"] = account
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *proxyServer) models(w http.ResponseWriter, _ *http.Request) {
