@@ -131,7 +131,6 @@ func TestSessionIDPiHeaderPrecedence(t *testing.T) {
 	server := &proxyServer{sessionID: "default"}
 	for _, test := range []struct{ name, header, want string }{
 		{"session_id", "session_id", "sid"},
-		{"client request id", "X-Client-Request-Id", "request"},
 		{"session affinity", "X-Session-Affinity", "affinity"},
 		{"session id", "X-Session-Id", "session"},
 		{"prompt cache", "X-Prompt-Cache-Key", "cache"},
@@ -146,6 +145,9 @@ func TestSessionIDPiHeaderPrecedence(t *testing.T) {
 	}
 	r := httptest.NewRequest("POST", "/", nil)
 	r.Header.Set("X-Client-Request-Id", "request")
+	if got := server.resolveSessionID(r); got != "default" {
+		t.Fatalf("request ID must not become session affinity: got %q", got)
+	}
 	r.Header.Set("X-Session-Affinity", "affinity")
 	r.Header.Set("session_id", "sid")
 	r.Header.Set("X-Prompt-Cache-Key", "cache")

@@ -278,9 +278,9 @@ type eventSource struct {
 }
 
 // openEventSource selects a transport. The WebSocket continuation transport is
-// used only when a per-session identifier is available (via X-Session-Id or
-// X-Prompt-Cache-Key from the client), so that parallel sessions get isolated
-// continuation state. Without a per-session key the proxy falls back to SSE,
+// used only when a stable per-session identifier is available (via
+// X-Session-Id, X-Prompt-Cache-Key, session_id, or X-Session-Affinity), so
+// that parallel sessions get isolated continuation state. Without a per-session key the proxy falls back to SSE,
 // which still yields static-prefix caching via prompt_cache_key.
 //
 // forChat selects the response-item conversion shape used for continuation
@@ -465,14 +465,14 @@ func randomID() string {
 }
 
 // resolveSessionID returns the prompt-cache/session identifier for a request.
-// Clients may override the proxy's default session by sending one of Pi's
-// OpenAI-compatible affinity headers. This keeps separate conversations in
-// separate cache namespaces and enables WebSocket continuation. Otherwise the
-// proxy-wide default session ID is used.
+// Clients may override the proxy's default session only with a stable
+// affinity/cache header. X-Client-Request-Id intentionally is not considered:
+// it is a per-request tracing identifier in OpenAI-compatible clients, and
+// treating it as affinity would create a WebSocket session for every request.
+// Otherwise the proxy-wide default session ID is used.
 func (s *proxyServer) resolveSessionID(r *http.Request) string {
 	for _, header := range []string{
-		"X-Session-Id", "X-Prompt-Cache-Key", "session_id",
-		"X-Session-Affinity", "X-Client-Request-Id",
+		"X-Session-Id", "X-Prompt-Cache-Key", "session_id", "X-Session-Affinity",
 	} {
 		if key := strings.TrimSpace(r.Header.Get(header)); key != "" {
 			return clampPromptCacheKey(key)
