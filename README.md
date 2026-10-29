@@ -1,3 +1,5 @@
+**Archived after finding more complete alternative https://github.com/router-for-me/CLIProxyAPI**
+
 # chatgpt-openai-api-adapter
 
 Minimal Go proxy that allows using ChatGPT subscription via OpenAI-compatible API. Takes around 10-20MB of system RAM while in use.
